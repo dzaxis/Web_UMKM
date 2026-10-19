@@ -1,6 +1,12 @@
 import { Injectable } from "@nestjs/common";
 import { PrismaService } from "../database/prisma.service.js";
 import { RedisService } from "../cache/redis.service.js";
+import {
+  EXCLUDED_ORDER_STATUSES,
+  eachUtcDate,
+  resolveStoreWindow,
+  serializeWindow,
+} from "../common/utils/store-window.js";
 
 export type SalesSummary = {
   totalSales: number;
@@ -9,6 +15,12 @@ export type SalesSummary = {
   avgOrderValue: number;
   avgItemsPerOrder: number;
   period: "7d" | "30d" | "ytd";
+  dataRange: {
+    start: string;
+    end: string;
+    latestDataDate: string | null;
+    hasData: boolean;
+  };
 };
 
 export type SalesTrend = {
@@ -42,18 +54,19 @@ export class AnalyticsService {
   ) {}
 
   async getSalesSummary(storeId: string, period: "7d" | "30d" | "ytd" = "30d"): Promise<SalesSummary> {
-    const cacheKey = `store:${storeId}:metric:summary:${period}`;
+    const days = period === "7d" ? 7 : period === "30d" ? 30 : null;
+    const window = await resolveStoreWindow(this.prisma, storeId, days);
+    const cacheKey = `store:${storeId}:metric:summary:${period}:${window.latestDataDate?.toISOString() ?? "empty"}`;
     const cached = await this.redis.get<SalesSummary>(cacheKey);
     if (cached) return cached;
 
-    const days = period === "7d" ? 7 : period === "30d" ? 30 : 365;
-    const startDate = new Date();
-    startDate.setDate(startDate.getDate() - days);
-
+    // Periode dihitung dari data terakhir toko, bukan jam dinding. Dataset
+    // historis yang diimpor tahun lalu tetap punya "30 hari terakhir".
     const orders = await this.prisma.orders.findMany({
       where: {
         storeId,
-        orderDate: { gte: startDate },
+        status: { notIn: [...EXCLUDED_ORDER_STATUSES] },
+        orderDate: { gte: window.start, lte: window.end },
       },
       include: { items: true },
     });
@@ -62,28 +75,32 @@ export class AnalyticsService {
     const totalOrders = orders.length;
     const totalItems = orders.reduce((sum, o) => sum + o.items.length, 0);
 
-    const result = {
+    const result: SalesSummary = {
       totalSales,
       totalOrders,
       totalItems,
       avgOrderValue: totalOrders > 0 ? totalSales / totalOrders : 0,
       avgItemsPerOrder: totalOrders > 0 ? totalItems / totalOrders : 0,
       period,
+      dataRange: serializeWindow(window),
     };
 
     await this.redis.set(cacheKey, result, 3600);
     return result;
   }
 
-  async getSalesTrend(storeId: string, period: "7d" | "30d" | "90d" = "30d"): Promise<SalesTrend[]> {
-    const days = period === "7d" ? 7 : period === "30d" ? 30 : 90;
-    const startDate = new Date();
-    startDate.setDate(startDate.getDate() - days);
+  async getSalesTrend(
+    storeId: string,
+    period: "7d" | "30d" | "90d" | "ytd" = "30d",
+  ): Promise<SalesTrend[]> {
+    const days = period === "7d" ? 7 : period === "30d" ? 30 : period === "90d" ? 90 : null;
+    const window = await resolveStoreWindow(this.prisma, storeId, days);
 
     const orders = await this.prisma.orders.findMany({
       where: {
         storeId,
-        orderDate: { gte: startDate },
+        status: { notIn: [...EXCLUDED_ORDER_STATUSES] },
+        orderDate: { gte: window.start, lte: window.end },
       },
       include: { items: true },
     });
@@ -100,14 +117,17 @@ export class AnalyticsService {
       entry.itemCount += order.items.length;
     }
 
-    return Array.from(grouped.entries())
-      .sort(([a], [b]) => a.localeCompare(b))
-      .map(([date, data]) => ({
+    // Hari tanpa transaksi tetap muncul sebagai nol. Kalau hari sepi dihapus,
+    // sumbu waktu bolong dan garis tren berbohong tentang jarak antar titik.
+    return eachUtcDate(window.start, window.end).map((date) => {
+      const entry = grouped.get(date);
+      return {
         date,
-        sales: data.sales,
-        orderCount: data.orderCount,
-        itemCount: data.itemCount,
-      }));
+        sales: entry?.sales ?? 0,
+        orderCount: entry?.orderCount ?? 0,
+        itemCount: entry?.itemCount ?? 0,
+      };
+    });
   }
 
   async getTopProducts(storeId: string, limit: number = 10): Promise<TopProduct[]> {
@@ -179,6 +199,7 @@ export class AnalyticsService {
   }
 
   async getInventoryStatus(storeId: string): Promise<any[]> {
+    const window = await resolveStoreWindow(this.prisma, storeId, 90);
     const products = await this.prisma.products.findMany({
       where: { storeId, deletedAt: null },
       include: {
@@ -189,11 +210,15 @@ export class AnalyticsService {
       },
     });
 
-    const last90Days = new Date();
-    last90Days.setDate(last90Days.getDate() - 90);
-
     return products.map((p) => {
-      const itemsIn90d = p.orderItems.filter((oi) => oi.order.orderDate >= last90Days);
+      const itemsIn90d = p.orderItems.filter(
+        (oi) =>
+          oi.order.orderDate >= window.start &&
+          oi.order.orderDate <= window.end &&
+          !EXCLUDED_ORDER_STATUSES.includes(
+            oi.order.status as (typeof EXCLUDED_ORDER_STATUSES)[number],
+          ),
+      );
       const totalQtySold = itemsIn90d.reduce((sum, oi) => sum + Number(oi.qty), 0);
       const turnoverRate = itemsIn90d.length > 0 ? totalQtySold / 90 : 0; // avg qty per day
 
@@ -245,7 +270,12 @@ export class AnalyticsService {
     const byProduct = Array.from(byProd.values()).map((e) => {
       const cost = e.hasCost ? e.cost : null;
       const profit = cost !== null ? e.revenue - cost : null;
-      const marginPercent = e.hasCost && e.revenue > 0 ? ((profit! / e.revenue) * 100) : (e.hasCost ? Number(e.hasCost) : null);
+      const computedMargin =
+        e.hasCost && e.revenue > 0
+          ? Number(((profit! / e.revenue) * 100).toFixed(2))
+          : e.hasCost
+            ? 0
+            : null;
       return {
         productId: e.productId,
         sku: e.sku,
@@ -255,7 +285,7 @@ export class AnalyticsService {
         totalRevenue: e.revenue,
         totalCost: cost,
         grossProfit: profit,
-        marginPercent: e.hasCost && e.revenue > 0 ? Number((((profit! / e.revenue) * 100).toFixed(2))) : (e.hasCost ? Number(e.hasCost ? 0 : 0) : null),
+        marginPercent: computedMargin,
       };
     }).sort((a, b) => (b.grossProfit ?? b.totalRevenue) - (a.grossProfit ?? a.totalRevenue));
 
@@ -366,13 +396,21 @@ export class AnalyticsService {
       if (!e.firstOrder || o.orderDate < e.firstOrder) e.firstOrder = o.orderDate;
     }
     const customerIds = Array.from(map.keys());
-    const customers = await this.prisma.customers.findMany({ where: { id: { in: customerIds } } });
+    const [customers, window] = await Promise.all([
+      this.prisma.customers.findMany({ where: { id: { in: customerIds } } }),
+      resolveStoreWindow(this.prisma, storeId, null),
+    ]);
+    const reference = window.latestDataDate ?? new Date();
     const cMap = new Map(customers.map((c) => [c.id, c]));
     return Array.from(map.values())
       .map((e) => {
         const c = cMap.get(e.customerId);
-        const now = new Date();
-        const recency = e.lastOrder ? Math.floor((now.getTime() - e.lastOrder.getTime()) / 86400000) : null;
+        const recency = e.lastOrder
+          ? Math.max(
+              0,
+              Math.floor((reference.getTime() - e.lastOrder.getTime()) / 86400000),
+            )
+          : null;
         return {
           customerId: e.customerId,
           name: c?.name ?? null,

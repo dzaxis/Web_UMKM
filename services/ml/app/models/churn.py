@@ -7,7 +7,6 @@ import numpy as np
 import pandas as pd
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
-from xgboost import XGBClassifier
 from sklearn.ensemble import RandomForestClassifier
 
 from app.core import config as cfg
@@ -45,6 +44,8 @@ class ChurnModel:
         return rfm.reset_index(), max_date
 
     def train(self, df, test_size=0.2):
+        from xgboost import XGBClassifier
+
         data, max_date = self._build_features_labels(df)
         X = data[self.feature_cols].fillna(0).to_numpy(dtype=float)
         y = data["churn"].to_numpy()

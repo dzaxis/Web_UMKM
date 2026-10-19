@@ -18,7 +18,7 @@ export class ProductsController {
 
   @Post()
   @Roles(Role.OWNER, Role.ADMIN)
-  @StoreAccess()
+  @StoreAccess("OWNER")
   async create(@CurrentUser() user: AuthUser, @Param("storeId") storeId: string, @Body() body: any) {
     return { data: await this.service.create(storeId, body) };
   }
@@ -31,14 +31,14 @@ export class ProductsController {
 
   @Patch(":id")
   @Roles(Role.OWNER, Role.ADMIN)
-  @StoreAccess()
+  @StoreAccess("OWNER")
   async update(@Param("storeId") storeId: string, @Param("id") id: string, @Body() body: any) {
     return { data: await this.service.update(storeId, id, body) };
   }
 
   @Delete(":id")
   @Roles(Role.OWNER, Role.ADMIN)
-  @StoreAccess()
+  @StoreAccess("OWNER")
   async del(@Param("storeId") storeId: string, @Param("id") id: string) {
     return { data: await this.service.delete(storeId, id) };
   }

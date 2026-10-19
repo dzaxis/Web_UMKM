@@ -1,7 +1,13 @@
-import { Controller, Get, Param, Res } from "@nestjs/common";
+import { Controller, Get, Param, Query, Res } from "@nestjs/common";
 import type { Response } from "express";
 import { StoreAccess } from "../common/decorators/store-access.decorator.js";
 import { ReportsService } from "./reports.service.js";
+
+type ReportPeriod = "7d" | "30d" | "90d";
+
+function asPeriod(value: string | undefined): ReportPeriod {
+  return value === "7d" || value === "90d" ? value : "30d";
+}
 
 @Controller("stores/:storeId/reports")
 export class ReportsController {
@@ -11,9 +17,10 @@ export class ReportsController {
   @StoreAccess()
   async getSalesSummary(
     @Param("storeId") storeId: string,
+    @Query("period") period: string | undefined,
     @Res() res: Response,
   ) {
-    const buffer = await this.service.generateSalesSummaryPDF(storeId);
+    const buffer = await this.service.generateSalesSummaryPDF(storeId, asPeriod(period));
     res.set({
       "Content-Type": "text/html",
       "Content-Disposition": `attachment; filename="sales_report_${new Date().toISOString().split("T")[0]}.html"`,
@@ -54,9 +61,10 @@ export class ReportsController {
   @StoreAccess()
   async getSalesSummaryXlsx(
     @Param("storeId") storeId: string,
+    @Query("period") period: string | undefined,
     @Res() res: Response,
   ) {
-    const buffer = await this.service.generateSalesSummaryXlsx(storeId, "30d");
+    const buffer = await this.service.generateSalesSummaryXlsx(storeId, asPeriod(period));
     res.set({
       "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
       "Content-Disposition": `attachment; filename="sales_report_${new Date().toISOString().split("T")[0]}.xlsx"`,
@@ -68,9 +76,10 @@ export class ReportsController {
   @StoreAccess()
   async getSalesSummaryPdf(
     @Param("storeId") storeId: string,
+    @Query("period") period: string | undefined,
     @Res() res: Response,
   ) {
-    const buffer = await this.service.generateSalesSummaryPdf(storeId, "30d");
+    const buffer = await this.service.generateSalesSummaryPdf(storeId, asPeriod(period));
     res.set({ "Content-Type": "application/pdf", "Content-Disposition": `attachment; filename="sales_report_${new Date().toISOString().split("T")[0]}.pdf"` });
     res.send(buffer);
   }

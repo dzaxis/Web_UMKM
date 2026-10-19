@@ -39,37 +39,45 @@ Base path: `/api/v1`. Swagger: `/api/v1/docs` (non-production).
 | GET/PATCH | `/stores/:storeId/margins` | OWNER |
 
 ## Dataset
-| Method | Path |
-|---|---|
-| POST/GET | `/stores/:storeId/datasets` |
-| GET | `/stores/:storeId/datasets/template.csv` |
-| GET | `/stores/:storeId/datasets/:datasetId`, `/issues` |
-| POST | `/:datasetId/mapping`, `/validate`, `/commit`, `/rollback` |
+| Method | Path | Akses |
+|---|---|---|
+| POST/GET | `/stores/:storeId/datasets` | membership (STAFF boleh upload harian) |
+| GET | `/stores/:storeId/datasets/template.csv` | membership |
+| GET | `/stores/:storeId/datasets/:datasetId`, `/issues` | membership |
+| POST | `/:datasetId/mapping`, `/validate`, `/commit` | membership |
+| POST | `/:datasetId/rollback` | OWNER |
 
 ## Analytics
-| Method | Path |
-|---|---|
-| GET | `/stores/:storeId/analytics/summary`, `/trend`, `/top-products`, `/customer-segments`, `/inventory` |
-| GET | `/profitability`, `/category-breakdown`, `/product-performance`, `/customer-value` |
-| POST | `/analytics/run` → `202 { jobId }` |
-| GET | `/analytics/jobs`, `/analytics/jobs/:jobId` |
+| Method | Path | Akses |
+|---|---|---|
+| GET | `/stores/:storeId/analytics/summary`, `/trend`, `/top-products`, `/customer-segments`, `/inventory` | membership |
+| GET | `/profitability`, `/category-breakdown`, `/product-performance`, `/customer-value` | membership |
+| POST | `/analytics/run` → `202 { jobId }` | OWNER |
+| GET | `/analytics/jobs`, `/analytics/jobs/:jobId` | membership |
+
+`jobType` yang diterima: `forecast`, `segmentation`, `market-basket`, `basket`,
+`churn`, `anomaly`. Nilai lain ditolak `400` sebelum job dibuat.
 
 ## Forecast
-| Method | Path |
-|---|---|
-| POST | `/stores/:storeId/forecast/compute` |
-| GET | `/stores/:storeId/forecast/:productId` |
+| Method | Path | Akses |
+|---|---|---|
+| POST | `/stores/:storeId/forecast/compute` | OWNER |
+| GET | `/stores/:storeId/forecast/:productId` | membership |
 
 ## Reports
 | Method | Path | Format |
 |---|---|---|
-| GET | `/stores/:storeId/reports/sales-summary` | HTML |
+| GET | `/stores/:storeId/reports/sales-summary?period=7d\|30d\|90d` | HTML |
 | GET | `/stores/:storeId/reports/detailed` | CSV |
 | GET | `/stores/:storeId/reports/forecast/:productId` | HTML |
 | GET | `/stores/:storeId/reports/sales-summary/xlsx` | XLSX |
 | GET | `/stores/:storeId/reports/sales-summary/pdf` | PDF |
 | GET | `/stores/:storeId/reports/detailed/xlsx` | XLSX |
 | GET | `/stores/:storeId/reports/forecast/:productId/pdf` | PDF |
+
+Periode laporan dihitung dari tanggal transaksi terakhir toko. Forecast report
+memakai `forecastResults` per produk bila ada; bila kosong, memakai hasil job
+forecast toko terakhir dan memberi label “Tingkat toko”.
 
 ## Notifications
 | Method | Path |

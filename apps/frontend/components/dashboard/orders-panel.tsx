@@ -6,12 +6,26 @@ import { useSession } from "@/components/dashboard/session-provider";
 import { listAccessibleStores } from "@/lib/dashboard-data";
 import type { StoreSummary } from "@/lib/dashboard-data";
 import { API_BASE_URL, API_PREFIX } from "@/lib/api-client";
+import { useApiResource } from "./use-api-resource";
+
+type Order = { id: string; items?: unknown[] };
+
+async function api<T>(path: string, method: string, body?: unknown): Promise<T> {
+  const res = await fetch(`${API_BASE_URL}${API_PREFIX}${path}`, {
+    method,
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const json = await res.json();
+  if (!res.ok) throw new Error(json?.error?.message ?? "Permintaan gagal");
+  return json.data as T;
+}
 
 export function OrdersPanel() {
   const session = useSession();
   const [stores, setStores] = React.useState<StoreSummary[]>([]);
   const [storeId, setStoreId] = React.useState<string | null>(null);
-  const [orders, setOrders] = React.useState<any[]>([]);
   const [message, setMessage] = React.useState<string | null>(null);
   const [customerCode, setCustomerCode] = React.useState("C1");
   const [customerName, setCustomerName] = React.useState("Ridho");
@@ -19,34 +33,29 @@ export function OrdersPanel() {
   const [qty, setQty] = React.useState("1");
   const [price, setPrice] = React.useState("3000");
 
-  async function api(path: string, method: string, body?: unknown) {
-    const res = await fetch(`${API_BASE_URL}${API_PREFIX}${path}`, {
-      method,
-      credentials: "include",
-      headers: { "Content-Type": "application/json" },
-      body: body ? JSON.stringify(body) : undefined,
-    });
-    const json = await res.json();
-    if (!res.ok) throw new Error(json?.error?.message ?? "Permintaan gagal");
-    return json.data;
-  }
-
-  const load = React.useCallback(async () => {
-    if (!storeId) return;
-    setOrders(await api(`/stores/${storeId}/orders`, "GET"));
+  const load = React.useCallback(async (): Promise<Order[]> => {
+    if (!storeId) return [];
+    return api<Order[]>(`/stores/${storeId}/orders`, "GET");
   }, [storeId]);
+
+  const orders = useApiResource(load);
 
   React.useEffect(() => {
     if (session.status !== "ready") return;
-    void listAccessibleStores().then((items) => {
-      setStores(items);
-      if (items.length > 0) setStoreId(items[0].id);
-    });
+    let active = true;
+    void listAccessibleStores()
+      .then((items) => {
+        if (!active) return;
+        setStores(items);
+        if (items.length > 0) setStoreId(items[0].id);
+      })
+      .catch(() => {
+        if (active) setMessage("Gagal memuat toko");
+      });
+    return () => {
+      active = false;
+    };
   }, [session.status]);
-
-  React.useEffect(() => {
-    void load();
-  }, [load]);
 
   async function submit(event: React.FormEvent) {
     event.preventDefault();
@@ -61,7 +70,7 @@ export function OrdersPanel() {
         items: [{ productSku: sku, qty: Number(qty), price: Number(price) }],
       });
       setMessage("Order dibuat");
-      await load();
+      orders.reload();
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Gagal");
     }
@@ -83,13 +92,27 @@ export function OrdersPanel() {
         </form>
         {message ? <p className="text-sm text-muted-foreground">{message}</p> : null}
       </div>
-      <ul className="flex flex-col gap-2">
-        {orders.map((order) => (
-          <li key={order.id} className="rounded border p-3 text-sm">
-            {order.id} · {order.items?.length ?? 0} item
-          </li>
-        ))}
-      </ul>
+
+      {orders.status === "loading" ? (
+        <p className="text-sm text-muted-foreground">Memuat pesanan...</p>
+      ) : orders.status === "error" && orders.error !== null ? (
+        <div className="flex items-center gap-3 text-sm text-red-700">
+          <span>{orders.error.message}</span>
+          <Button size="sm" variant="outline" onClick={orders.reload}>
+            Coba lagi
+          </Button>
+        </div>
+      ) : orders.data !== null && orders.data.length > 0 ? (
+        <ul className="flex flex-col gap-2">
+          {orders.data.map((order) => (
+            <li key={order.id} className="rounded border p-3 text-sm">
+              {order.id} · {order.items?.length ?? 0} item
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="text-sm text-muted-foreground">Belum ada pesanan pada toko ini.</p>
+      )}
     </div>
   );
 }

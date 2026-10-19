@@ -6,6 +6,7 @@ import { useSession } from "@/components/dashboard/session-provider";
 import { listAccessibleStores } from "@/lib/dashboard-data";
 import type { StoreSummary } from "@/lib/dashboard-data";
 import { API_BASE_URL, API_PREFIX } from "@/lib/api-client";
+import { JobResultView } from "./job-result-view";
 
 type JobType = "forecast" | "segmentation" | "basket" | "churn" | "anomaly";
 
@@ -23,7 +24,7 @@ type JobResult = {
   jobId: string;
   status: JobStatus;
   jobType: string;
-  result?: any;
+  result?: unknown;
   explanation?: string | null;
   errorMessage?: string | null;
   createdAt?: string;
@@ -78,6 +79,15 @@ export function AnalyticsJobPanel() {
   React.useEffect(() => {
     if (!jobId || !storeId) return;
     let active = true;
+    let timer: ReturnType<typeof setInterval> | null = null;
+
+    const stop = () => {
+      if (timer !== null) {
+        clearInterval(timer);
+        timer = null;
+      }
+    };
+
     const poll = async () => {
       try {
         const res = await fetch(
@@ -88,18 +98,19 @@ export function AnalyticsJobPanel() {
         if (!active) return;
         if (res.ok) setJob(data.data);
         if (data?.data?.status === "completed" || data?.data?.status === "failed") {
-          clearInterval(timer);
+          stop();
         }
-      } catch (e) {
+      } catch {
         if (active) setMessage("Gagal polling status");
-        clearInterval(timer);
+        stop();
       }
     };
-    poll();
-    const timer = setInterval(poll, 2000);
+
+    void poll();
+    timer = setInterval(() => void poll(), 2000);
     return () => {
       active = false;
-      clearInterval(timer);
+      stop();
     };
   }, [jobId, storeId]);
 
@@ -176,12 +187,10 @@ export function AnalyticsJobPanel() {
                 {job.errorMessage}
               </div>
             )}
-            {job.status === "completed" && job.result && (
+            {job.status === "completed" && job.result != null && (
               <div className="mt-4">
                 <div className="text-sm font-medium mb-2">Hasil:</div>
-                <pre className="bg-gray-50 border rounded p-3 text-xs overflow-auto max-h-96">
-{JSON.stringify(job.result, null, 2)}
-                </pre>
+                <JobResultView jobType={job.jobType} result={job.result} />
               </div>
             )}
           </CardContent>

@@ -6,7 +6,7 @@ import * as React from "react";
 
 import { Badge, Button, Skeleton } from "@/components/ui";
 
-import { navForRole, toPlatformRole } from "@/lib/dashboard-nav";
+import { deriveNavRole, navForRole } from "@/lib/dashboard-nav";
 import type { NavItem } from "@/lib/dashboard-nav";
 
 import { useSession } from "./session-provider";
@@ -35,7 +35,7 @@ export function Sidebar() {
   const { status, profile, logout } = useSession();
   const [loggingOut, setLoggingOut] = React.useState(false);
 
-  const role = toPlatformRole(profile?.role);
+  const role = deriveNavRole(profile);
   const items = navForRole(role);
 
   async function handleLogout(): Promise<void> {

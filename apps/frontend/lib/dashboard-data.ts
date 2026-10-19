@@ -37,8 +37,44 @@
 
 import { sessionRequest } from "./session-refresh";
 
-/** Peran user DI SUATU TOKO. Beda dari peran platform. */
 export type StoreRole = "OWNER" | "STAFF";
+
+/** Peran user di suatu toko, sesuai `StoreMemberRole` backend. */
+export type IssuedInvitation = {
+  id: string;
+  email: string;
+  role: StoreRole;
+  expiresAt: string;
+  token: string;
+};
+
+/** Ringkasan undangan yang aman ditampilkan di halaman publik. */
+export type InvitationPreview = {
+  email: string;
+  storeName: string;
+  role: StoreRole;
+  expiresAt: string;
+};
+
+/** Hasil menerima undangan. */
+export type AcceptedInvitation = {
+  storeId: string;
+  storeName: string;
+  role: StoreRole;
+};
+
+export type NotificationSeverity = "info" | "warning" | "success" | "error";
+
+export type NotificationItem = {
+  id: string;
+  storeId: string | null;
+  type: string;
+  title: string;
+  body: string | null;
+  severity: NotificationSeverity;
+  readAt: string | null;
+  createdAt: string;
+};
 
 /** `StoreStatus` di backend. */
 export type StoreStatus = "ACTIVE" | "SUSPENDED";
@@ -62,6 +98,9 @@ export type StoreView = {
   timezone: string;
   status: StoreStatus;
 };
+
+/** Toko + peran PEMBUAT-nya - hasil `POST /stores`. */
+export type CreatedStore = StoreView & { role: StoreRole };
 
 /** Satu anggota toko beserta user-nya. */
 export type StoreMember = {
@@ -112,6 +151,26 @@ export function listAccessibleStores(): Promise<StoreSummary[]> {
 }
 
 /**
+ * `POST /stores` - buat toko baru; pemanggil otomatis jadi OWNER.
+ *
+ * `city` dikirim hanya kalau ada isinya, bukan sebagai `undefined`: body JSON
+ * dengan `city: undefined` tetap ikut kalau diserialisasi oleh pemanggil lain,
+ * sedangkan `CreateStoreDto` menolak field yang bukan string. Memilih bentuk
+ * body di sini membuat kontraknya satu tempat.
+ */
+export function createStore(input: {
+  name: string;
+  city?: string;
+}): Promise<CreatedStore> {
+  const body =
+    input.city === undefined
+      ? { name: input.name }
+      : { name: input.name, city: input.city };
+
+  return sessionRequest<CreatedStore>("/stores", { method: "POST", body });
+}
+
+/**
  * `GET /stores/:storeId/members`.
  *
  * `storeId` selalu datang dari data yang baru saja dibaca backend - bukan
@@ -141,6 +200,40 @@ export function updateStore(
   });
 }
 
+/**
+ * `POST /stores/:storeId/invitations` - terbitkan undangan pegawai.
+ *
+ * Hanya OWNER toko yang boleh memanggilnya (backend `@Roles + @StoreAccess`).
+ * Token mentah yang dikembalikan muncul SATU KALI; simpan lalu kirim lewat
+ * email/out-of-band, karena berikutnya yang tercatat hanya digest-nya.
+ */
+export function inviteMember(
+  storeId: string,
+  input: { email: string; role: StoreRole },
+): Promise<IssuedInvitation> {
+  return sessionRequest<IssuedInvitation>(
+    `/stores/${encodeURIComponent(storeId)}/invitations`,
+    { method: "POST", body: input },
+  );
+}
+
+/**
+ * `GET /invitations/:token` (publik) - ringkasan undangan sebelum diterima.
+ */
+export function previewInvitation(token: string): Promise<InvitationPreview> {
+  return sessionRequest<InvitationPreview>(`/invitations/${encodeURIComponent(token)}`);
+}
+
+/**
+ * `POST /invitations/:token/accept` (auth) - terima undangan dan jadi anggota.
+ */
+export function acceptInvitation(token: string): Promise<AcceptedInvitation> {
+  return sessionRequest<AcceptedInvitation>(
+    `/invitations/${encodeURIComponent(token)}/accept`,
+    { method: "POST" },
+  );
+}
+
 /** `GET /admin/users` - khusus ADMIN. */
 export function listAdminUsers(): Promise<AdminUser[]> {
   return sessionRequest<AdminUser[]>(`/admin/users?page=1&pageSize=${MAX_PAGE_SIZE}`);
@@ -166,4 +259,86 @@ export function setUserActive(
 /** `GET /admin/stores` - khusus ADMIN. */
 export function listAdminStores(): Promise<AdminStore[]> {
   return sessionRequest<AdminStore[]>(`/admin/stores?page=1&pageSize=${MAX_PAGE_SIZE}`);
+}
+
+/** `GET /admin/ml-jobs` - monitor job ML lintas toko (ADMIN). */
+export function listAdminMlJobs(params?: {
+  status?: string;
+  limit?: number;
+  offset?: number;
+}): Promise<
+  Array<{
+    id: string;
+    storeId: string | null;
+    jobType: string;
+    status: string;
+    createdAt: string;
+    startedAt: string | null;
+    completedAt: string | null;
+    errorMessage: string | null;
+  }>
+> {
+  const query = new URLSearchParams();
+  if (params?.status) query.set("status", params.status);
+  if (params?.limit !== undefined) query.set("limit", String(params.limit));
+  if (params?.offset !== undefined) query.set("offset", String(params.offset));
+  const suffix = query.toString();
+  return sessionRequest(
+    `/admin/ml-jobs${suffix ? `?${suffix}` : ""}`,
+  );
+}
+
+/** `GET /admin/ml-models` - status ML service/model (ADMIN). */
+export function adminMlModels(): Promise<unknown> {
+  return sessionRequest("/admin/ml-models");
+}
+
+/**
+ * `GET /notifications` - notifikasi pengguna, dengan filter toko/status/paging.
+ */
+export function listNotifications(params?: {
+  storeId?: string;
+  status?: "all" | "unread" | "read";
+  limit?: number;
+  offset?: number;
+}): Promise<NotificationItem[]> {
+  const query = new URLSearchParams();
+  if (params?.storeId) query.set("storeId", params.storeId);
+  if (params?.status && params.status !== "all") query.set("status", params.status);
+  if (params?.limit !== undefined) query.set("limit", String(params.limit));
+  if (params?.offset !== undefined) query.set("offset", String(params.offset));
+
+  const suffix = query.toString();
+  return sessionRequest<NotificationItem[]>(
+    `/notifications${suffix ? `?${suffix}` : ""}`,
+  );
+}
+
+/** `GET /notifications/unread-count`. */
+export function unreadNotificationCount(storeId?: string): Promise<number> {
+  const query = new URLSearchParams();
+  if (storeId) query.set("storeId", storeId);
+  const suffix = query.toString();
+  return sessionRequest<{ count: number }>(
+    `/notifications/unread-count${suffix ? `?${suffix}` : ""}`,
+  ).then((result) => result.count);
+}
+
+/** `PATCH /notifications/:id/read`. */
+export function markNotificationRead(id: string): Promise<NotificationItem> {
+  return sessionRequest<NotificationItem>(
+    `/notifications/${encodeURIComponent(id)}/read`,
+    { method: "PATCH" },
+  );
+}
+
+/** `POST /notifications/read-all`. */
+export function markAllNotificationsRead(storeId?: string): Promise<number> {
+  const query = new URLSearchParams();
+  if (storeId) query.set("storeId", storeId);
+  const suffix = query.toString();
+  return sessionRequest<{ updated: number }>(
+    `/notifications/read-all${suffix ? `?${suffix}` : ""}`,
+    { method: "POST" },
+  ).then((result) => result.updated);
 }

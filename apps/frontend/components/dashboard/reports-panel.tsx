@@ -6,8 +6,19 @@ import { useSession } from "@/components/dashboard/session-provider";
 import { listAccessibleStores } from "@/lib/dashboard-data";
 import type { StoreSummary } from "@/lib/dashboard-data";
 import { API_BASE_URL, API_PREFIX } from "@/lib/api-client";
+import { useApiResource } from "./use-api-resource";
 
-type ReportType = "sales-summary" | "detailed" | "forecast";
+type ReportType = "sales-summary" | "detailed" | "forecast" | "customers";
+type ReportFormat = "html" | "csv" | "xlsx" | "pdf";
+type ProductOption = { id: string; sku: string; name: string };
+type SegmentOption = { segment: string; customerCount: number };
+
+const FORMATS_BY_TYPE: Record<ReportType, readonly ReportFormat[]> = {
+  "sales-summary": ["html", "xlsx", "pdf"],
+  detailed: ["csv", "xlsx"],
+  forecast: ["html", "pdf"],
+  customers: ["csv"],
+};
 
 export function ReportsPanel() {
   const session = useSession();
@@ -15,43 +26,66 @@ export function ReportsPanel() {
   const [storeId, setStoreId] = React.useState<string | null>(null);
   const [reportType, setReportType] = React.useState<ReportType>("sales-summary");
   const [period, setPeriod] = React.useState<"7d" | "30d" | "90d">("30d");
-  const [products, setProducts] = React.useState<Array<{ id: string; sku: string; name: string }>>([]);
+  const [format, setFormat] = React.useState<ReportFormat>("html");
   const [selectedProductId, setSelectedProductId] = React.useState<string>("");
-  
+  const [segmentFilter, setSegmentFilter] = React.useState<string>("all");
+
   const [loading, setLoading] = React.useState(false);
   const [message, setMessage] = React.useState<string | null>(null);
 
   React.useEffect(() => {
     if (session.status !== "ready" || !session.profile) return;
+    let active = true;
     void listAccessibleStores()
       .then((items) => {
+        if (!active) return;
         setStores(items);
         if (items.length > 0) setStoreId(items[0].id);
       })
-      .catch(() => setMessage("Gagal memuat toko"));
+      .catch(() => {
+        if (active) setMessage("Gagal memuat toko");
+      });
+    return () => {
+      active = false;
+    };
   }, [session.status, session.profile]);
 
-  React.useEffect(() => {
-    if (!storeId) return;
-    // Load products for forecast report
-    loadProducts();
+  const loadProducts = React.useCallback(async (): Promise<ProductOption[]> => {
+    if (!storeId) return [];
+    const res = await fetch(`${API_BASE_URL}${API_PREFIX}/stores/${storeId}/products`, {
+      credentials: "include",
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data?.error?.message ?? "Gagal memuat produk");
+    return (data.data ?? []) as ProductOption[];
   }, [storeId]);
 
-  async function loadProducts() {
-    if (!storeId) return;
-    try {
-      const res = await fetch(`${API_BASE_URL}${API_PREFIX}/stores/${storeId}/products`, {
-        credentials: "include",
-      });
-      const data = await res.json();
-      setProducts(data.data || []);
-      if (data.data?.length > 0) {
-        setSelectedProductId(data.data[0].id);
-      }
-    } catch (error) {
-      console.error("Failed to load products:", error);
-    }
-  }
+  const products = useApiResource(loadProducts);
+
+  const loadSegments = React.useCallback(async (): Promise<SegmentOption[]> => {
+    if (!storeId) return [];
+    const res = await fetch(
+      `${API_BASE_URL}${API_PREFIX}/stores/${storeId}/analytics/customer-segments`,
+      { credentials: "include" },
+    );
+    const data = await res.json();
+    if (!res.ok) throw new Error(data?.error?.message ?? "Gagal memuat segmen");
+    return (data.data ?? []) as SegmentOption[];
+  }, [storeId]);
+
+  const segments = useApiResource(loadSegments);
+
+  const currentStore = stores.find((store) => store.id === storeId);
+  const canExportCustomers = currentStore?.role === "OWNER";
+
+  // Format yang tersedia diturunkan dari tipe laporan, bukan disimpan lewat
+  // effect. Dengan begitu tidak ada render bertingkat dan tidak mungkin ada
+  // kombinasi tipe/format yang tidak didukung.
+  const allowedFormats = FORMATS_BY_TYPE[reportType];
+  const effectiveFormat: ReportFormat = allowedFormats.includes(format)
+    ? format
+    : allowedFormats[0];
+  const effectiveProductId = selectedProductId || products.data?.[0]?.id || "";
 
   async function downloadReport() {
     if (!storeId) return;
@@ -59,30 +93,40 @@ export function ReportsPanel() {
     setMessage(null);
 
     try {
-      let url = `${API_BASE_URL}${API_PREFIX}/stores/${storeId}/reports/`;
+      let url: string;
+      if (reportType === "customers") {
+        url = `${API_BASE_URL}${API_PREFIX}/stores/${storeId}/customers/export?segment=${encodeURIComponent(segmentFilter)}`;
+      } else {
+        url = `${API_BASE_URL}${API_PREFIX}/stores/${storeId}/reports/`;
 
-      if (reportType === "sales-summary") {
-        url += `sales-summary`;
-      } else if (reportType === "detailed") {
-        url += `detailed`;
-      } else if (reportType === "forecast") {
-        if (!selectedProductId) {
-          setMessage("Pilih produk untuk forecast report");
-          setLoading(false);
-          return;
+        if (reportType === "sales-summary") {
+          url += "sales-summary";
+          if (effectiveFormat === "xlsx") url += "/xlsx";
+          else if (effectiveFormat === "pdf") url += "/pdf";
+          url += `?period=${period}`;
+        } else if (reportType === "detailed") {
+          if (effectiveFormat === "xlsx") {
+            url += "detailed/xlsx";
+          } else {
+            url += "detailed";
+          }
+        } else if (reportType === "forecast") {
+          if (!effectiveProductId) {
+            setMessage("Pilih produk untuk forecast report");
+            setLoading(false);
+            return;
+          }
+          url += `forecast/${effectiveProductId}`;
+          if (effectiveFormat === "pdf") url += "/pdf";
         }
-        url += `forecast/${selectedProductId}`;
       }
 
-      const res = await fetch(url, {
-        credentials: "include",
-      });
+      const res = await fetch(url, { credentials: "include" });
 
       if (!res.ok) {
         throw new Error("Gagal generate laporan");
       }
 
-      // Get filename from headers or create default
       const contentDisposition = res.headers.get("content-disposition");
       let filename = "laporan.html";
       if (contentDisposition) {
@@ -91,14 +135,14 @@ export function ReportsPanel() {
       }
 
       const blob = await res.blob();
-      const url_obj = window.URL.createObjectURL(blob);
+      const urlObject = window.URL.createObjectURL(blob);
       const link = document.createElement("a");
-      link.href = url_obj;
+      link.href = urlObject;
       link.download = filename;
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
-      window.URL.revokeObjectURL(url_obj);
+      window.URL.revokeObjectURL(urlObject);
 
       setMessage("Laporan berhasil didownload");
     } catch (error) {
@@ -127,7 +171,6 @@ export function ReportsPanel() {
           <CardTitle>Buat Laporan</CardTitle>
         </CardHeader>
         <CardContent className="space-y-6">
-          {/* Store selector */}
           <div>
             <label className="block text-sm font-medium mb-2">Toko</label>
             <select
@@ -143,14 +186,21 @@ export function ReportsPanel() {
             </select>
           </div>
 
-          {/* Report type selector */}
           <div>
             <label className="block text-sm font-medium mb-2">Tipe Laporan</label>
             <div className="space-y-2">
               {[
                 { value: "sales-summary" as const, label: "Ringkasan Penjualan" },
                 { value: "detailed" as const, label: "Detail Pesanan & Item (90 hari)" },
-                { value: "forecast" as const, label: "Forecast Produk" },
+                { value: "forecast" as const, label: "Forecast Produk / Toko" },
+                ...(canExportCustomers
+                  ? [
+                      {
+                        value: "customers" as const,
+                        label: "Ekspor Pelanggan per Segmen (CSV)",
+                      },
+                    ]
+                  : []),
               ].map((type) => (
                 <label key={type.value} className="flex items-center gap-2 cursor-pointer">
                   <input
@@ -166,7 +216,6 @@ export function ReportsPanel() {
             </div>
           </div>
 
-          {/* Period selector (for sales-summary) */}
           {reportType === "sales-summary" && (
             <div>
               <label className="block text-sm font-medium mb-2">Periode</label>
@@ -188,29 +237,71 @@ export function ReportsPanel() {
             </div>
           )}
 
-          {/* Product selector (for forecast) */}
           {reportType === "forecast" && (
             <div>
               <label className="block text-sm font-medium mb-2">Produk</label>
               <select
-                value={selectedProductId}
+                value={effectiveProductId}
                 onChange={(e) => setSelectedProductId(e.target.value)}
                 className="w-full border rounded px-3 py-2"
               >
                 <option value="">Pilih produk...</option>
-                {products.map((p) => (
+                {(products.data ?? []).map((p) => (
                   <option key={p.id} value={p.id}>
                     {p.sku} - {p.name}
                   </option>
                 ))}
               </select>
+              {products.status === "error" && (
+                <p className="mt-2 text-sm text-red-700">Gagal memuat daftar produk.</p>
+              )}
             </div>
           )}
 
-          {/* Download button */}
+          {reportType === "customers" && (
+            <div>
+              <label className="block text-sm font-medium mb-2">Segmen Pelanggan</label>
+              <select
+                value={segmentFilter}
+                onChange={(e) => setSegmentFilter(e.target.value)}
+                className="w-full border rounded px-3 py-2"
+              >
+                <option value="all">Semua segmen</option>
+                {(segments.data ?? []).map((segment) => (
+                  <option key={segment.segment} value={segment.segment}>
+                    {segment.segment} ({segment.customerCount})
+                  </option>
+                ))}
+              </select>
+              <p className="mt-2 text-xs text-slate-500">
+                Segmen berasal dari hasil analisis RFM terakhir. Jalankan segmentasi
+                di halaman Analisis ML agar daftar ini terisi.
+              </p>
+            </div>
+          )}
+
+          <div>
+            <label className="block text-sm font-medium mb-2">Format</label>
+            <select
+              value={effectiveFormat}
+              onChange={(e) => setFormat(e.target.value as ReportFormat)}
+              className="w-full border rounded px-3 py-2"
+            >
+              {allowedFormats.map((f) => (
+                <option key={f} value={f}>
+                  {f.toUpperCase()}
+                </option>
+              ))}
+            </select>
+          </div>
+
           <Button
             onClick={downloadReport}
-            disabled={loading || (reportType === "forecast" && !selectedProductId)}
+            disabled={
+              loading ||
+              (reportType === "forecast" && !effectiveProductId) ||
+              (reportType === "customers" && !canExportCustomers)
+            }
             className="w-full"
           >
             {loading ? "Generating..." : "Download Laporan"}
@@ -218,20 +309,25 @@ export function ReportsPanel() {
         </CardContent>
       </Card>
 
-      {/* Info card */}
       <Card>
         <CardHeader>
           <CardTitle className="text-sm">Info Format Laporan</CardTitle>
         </CardHeader>
         <CardContent className="text-sm space-y-2">
           <p>
-            <strong>Ringkasan Penjualan:</strong> HTML (dapat dibuka di browser atau di-print ke PDF)
+            <strong>Ringkasan Penjualan:</strong> HTML, XLSX, dan PDF.
           </p>
           <p>
-            <strong>Detail Pesanan:</strong> CSV (dapat dibuka dengan Excel atau Sheets)
+            <strong>Detail Pesanan:</strong> CSV dan XLSX (detail pesanan &amp;
+            item 90 hari).
           </p>
           <p>
-            <strong>Forecast:</strong> HTML dengan tabel prediksi 30 hari ke depan
+            <strong>Forecast:</strong> HTML interaktif dan PDF. Memakai forecast
+            per produk bila tersedia; jika tidak, hasil analisis toko terakhir.
+          </p>
+          <p>
+            <strong>Pelanggan:</strong> CSV per segmen, lengkap dengan catatan audit
+            ekspor.
           </p>
         </CardContent>
       </Card>

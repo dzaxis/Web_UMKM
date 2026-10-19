@@ -10,7 +10,7 @@ export class ForecastController {
 
   @Post("compute")
   @Roles(Role.OWNER, Role.ADMIN)
-  @StoreAccess()
+  @StoreAccess("OWNER")
   async computeForecast(@Param("storeId") storeId: string) {
     const result = await this.service.computeForecast(storeId);
     return {

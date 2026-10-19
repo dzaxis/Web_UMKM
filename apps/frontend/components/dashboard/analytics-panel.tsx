@@ -6,6 +6,8 @@ import { useSession } from "@/components/dashboard/session-provider";
 import { listAccessibleStores } from "@/lib/dashboard-data";
 import type { StoreSummary } from "@/lib/dashboard-data";
 import { API_BASE_URL, API_PREFIX } from "@/lib/api-client";
+import { useApiResource } from "./use-api-resource";
+import { SalesTrendChart } from "./charts";
 
 type SalesSummary = {
   totalSales: number;
@@ -14,6 +16,12 @@ type SalesSummary = {
   avgOrderValue: number;
   avgItemsPerOrder: number;
   period: string;
+  dataRange?: {
+    start: string;
+    end: string;
+    latestDataDate: string | null;
+    hasData: boolean;
+  };
 };
 
 type SalesTrend = Array<{
@@ -32,69 +40,80 @@ type TopProduct = {
   orderCount: number;
 };
 
+type AnalyticsBundle = {
+  summary: SalesSummary | null;
+  trend: SalesTrend;
+  products: TopProduct[];
+};
+
 export function AnalyticsPanel() {
   const session = useSession();
   const [stores, setStores] = React.useState<StoreSummary[]>([]);
   const [storeId, setStoreId] = React.useState<string | null>(null);
   const [period, setPeriod] = React.useState<"7d" | "30d" | "ytd">("30d");
-  
-  const [summary, setSummary] = React.useState<SalesSummary | null>(null);
-  const [trend, setTrend] = React.useState<SalesTrend>([]);
-  const [topProducts, setTopProducts] = React.useState<TopProduct[]>([]);
-  const [loading, setLoading] = React.useState(false);
-  const [message, setMessage] = React.useState<string | null>(null);
 
   React.useEffect(() => {
     if (session.status !== "ready" || !session.profile) return;
+    let active = true;
     void listAccessibleStores()
       .then((items) => {
+        if (!active) return;
         setStores(items);
         if (items.length > 0) setStoreId(items[0].id);
       })
-      .catch(() => setMessage("Gagal memuat toko"));
+      .catch(() => {
+        if (active) setStores([]);
+      });
+    return () => {
+      active = false;
+    };
   }, [session.status, session.profile]);
 
-  async function loadAnalytics() {
-    if (!storeId) return;
-    setLoading(true);
-    try {
-      const headers = { credentials: "include" };
-      
-      const [summaryRes, trendRes, productsRes] = await Promise.all([
-        fetch(`${API_BASE_URL}${API_PREFIX}/stores/${storeId}/analytics/summary?period=${period}`, { headers }),
-        fetch(`${API_BASE_URL}${API_PREFIX}/stores/${storeId}/analytics/trend?period=${period}`, { headers }),
-        fetch(`${API_BASE_URL}${API_PREFIX}/stores/${storeId}/analytics/top-products?limit=10`, { headers }),
-      ]);
+  const load = React.useCallback(async (): Promise<AnalyticsBundle | null> => {
+    if (!storeId) return null;
+    const headers = { credentials: "include" as const };
+    const [summaryRes, trendRes, productsRes] = await Promise.all([
+      fetch(`${API_BASE_URL}${API_PREFIX}/stores/${storeId}/analytics/summary?period=${period}`, { headers }),
+      fetch(`${API_BASE_URL}${API_PREFIX}/stores/${storeId}/analytics/trend?period=${period}`, { headers }),
+      fetch(`${API_BASE_URL}${API_PREFIX}/stores/${storeId}/analytics/top-products?limit=10`, { headers }),
+    ]);
 
-      const [summaryData, trendData, productsData] = await Promise.all([
-        summaryRes.json(),
-        trendRes.json(),
-        productsRes.json(),
-      ]);
+    const [summaryData, trendData, productsData] = await Promise.all([
+      summaryRes.json(),
+      trendRes.json(),
+      productsRes.json(),
+    ]);
 
-      if (summaryRes.ok) setSummary(summaryData.data);
-      if (trendRes.ok) setTrend(trendData.data);
-      if (productsRes.ok) setTopProducts(productsData.data);
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Gagal memuat analytics");
-    } finally {
-      setLoading(false);
+    if (!summaryRes.ok || !trendRes.ok || !productsRes.ok) {
+      throw new Error(
+        summaryData?.error?.message ??
+          trendData?.error?.message ??
+          productsData?.error?.message ??
+          "Gagal memuat analytics",
+      );
     }
-  }
 
-  React.useEffect(() => {
-    if (storeId) loadAnalytics();
+    return {
+      summary: (summaryData.data ?? null) as SalesSummary | null,
+      trend: (trendData.data ?? []) as SalesTrend,
+      products: (productsData.data ?? []) as TopProduct[],
+    };
   }, [storeId, period]);
+
+  const analytics = useApiResource(load);
+  const summary = analytics.data?.summary ?? null;
+  const trend = analytics.data?.trend ?? [];
+  const topProducts = analytics.data?.products ?? [];
 
   return (
     <div className="space-y-6">
-      {message && (
+      {analytics.status === "error" && analytics.error !== null && (
         <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded">
-          {message}
+          {analytics.error.message}
         </div>
       )}
 
-      <div className="flex gap-4 items-center">
+      <div className="flex gap-4 items-center flex-wrap">
         <select
           value={storeId || ""}
           onChange={(e) => setStoreId(e.target.value || null)}
@@ -123,10 +142,24 @@ export function AnalyticsPanel() {
           ))}
         </div>
 
-        <Button onClick={loadAnalytics} disabled={loading}>
-          {loading ? "Loading..." : "Refresh"}
+        <Button onClick={analytics.reload} disabled={analytics.status === "loading"}>
+          {analytics.status === "loading" ? "Loading..." : "Refresh"}
         </Button>
       </div>
+
+      {stores.length === 0 && session.status === "ready" && (
+        <div className="rounded border border-dashed border-slate-300 bg-slate-50 px-4 py-6 text-center text-sm text-slate-600">
+          Belum ada toko yang bisa diakses. Buat toko terlebih dahulu di halaman Toko &amp; Tim.
+        </div>
+      )}
+
+      {summary?.dataRange?.hasData && (
+        <p className="text-sm text-slate-600">
+          Periode data: <strong>{summary.dataRange.start}</strong> s/d{" "}
+          <strong>{summary.dataRange.end}</strong> (transaksi terakhir{" "}
+          {summary.dataRange.latestDataDate}).
+        </p>
+      )}
 
       {/* KPI Cards */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
@@ -220,7 +253,8 @@ export function AnalyticsPanel() {
           <CardTitle>Tren Penjualan</CardTitle>
         </CardHeader>
         <CardContent>
-          <div className="overflow-x-auto">
+          <SalesTrendChart data={trend} />
+          <div className="mt-4 overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b">

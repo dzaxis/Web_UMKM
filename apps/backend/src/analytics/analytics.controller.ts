@@ -1,7 +1,16 @@
-﻿import { Controller, Get, Param, Query, Post, HttpCode, Body } from "@nestjs/common";
+﻿import { Controller, Get, Param, Query, Post, HttpCode, Body, BadRequestException } from "@nestjs/common";
 import { StoreAccess } from "../common/decorators/store-access.decorator.js";
 import { AnalyticsService } from "./analytics.service.js";
 import { MlJobService } from "../jobs/ml-job.service.js";
+
+const ML_JOB_TYPES = new Set([
+  "forecast",
+  "segmentation",
+  "market-basket",
+  "basket",
+  "churn",
+  "anomaly",
+]);
 
 @Controller("stores/:storeId/analytics")
 export class AnalyticsController {
@@ -25,7 +34,7 @@ export class AnalyticsController {
   @StoreAccess()
   async getTrend(
     @Param("storeId") storeId: string,
-    @Query("period") period: "7d" | "30d" | "90d" = "30d",
+    @Query("period") period: "7d" | "30d" | "90d" | "ytd" = "30d",
   ) {
     return {
       data: await this.service.getSalesTrend(storeId, period),
@@ -57,9 +66,13 @@ export class AnalyticsController {
   }
 
   // Phase 4: async analysis job submission
+  //
+  // Hanya OWNER yang boleh menjalankan analisis. Pegawai bersifat read-only
+  // untuk hasil analitik (Promt §5.3); memberi mereka akses POST akan membuat
+  // batas peran itu hanya kosmetik di UI.
   @Post("run")
   @HttpCode(202)
-  @StoreAccess()
+  @StoreAccess("OWNER")
   async runAnalysis(
     @Param("storeId") storeId: string,
     @Body()
@@ -69,6 +82,14 @@ export class AnalyticsController {
       idempotencyKey?: string;
     },
   ) {
+    if (!body?.jobType || !ML_JOB_TYPES.has(body.jobType)) {
+      throw new BadRequestException(
+        `jobType tidak dikenal. Pilihan: ${[...ML_JOB_TYPES].join(", ")}.`,
+      );
+    }
+    if (body.parameters != null && typeof body.parameters !== "object") {
+      throw new BadRequestException("parameters harus berupa objek.");
+    }
     const job = await this.mlJobs.createJob(storeId, body.jobType, body.parameters ?? {}, body.idempotencyKey);
     return {
       data: {

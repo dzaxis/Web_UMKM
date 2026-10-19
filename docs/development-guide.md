@@ -32,9 +32,11 @@ cd apps/frontend
 npm install
 npm run dev              # http://localhost:3001
 
-# ML service
-pip install -r services/ml/requirements.txt
-python -m uvicorn app.main:app --app-dir services/ml --port 8000
+# ML service (venv disarankan; butuh pyarrow untuk artefak joblib)
+cd services/ml
+python -m venv .venv
+.\.venv\Scripts\python -m pip install -r requirements.txt
+.\.venv\Scripts\python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
 ## Training ulang model
@@ -57,7 +59,7 @@ Konfigurasi MCP client mengarah ke command tersebut. Setiap tool butuh `accessTo
 ```bash
 cd apps/backend
 npm run test          # unit  (vitest)
-npm run test:e2e      # e2e   (butuh MySQL test + migration)
+npm run test:e2e      # e2e   (butuh MySQL test + migration + ML service jalan)
 npm run build         # tsc
 
 cd apps/frontend

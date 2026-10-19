@@ -1,5 +1,3 @@
-import path from "node:path";
-import url from "node:url";
 import type { INestApplication } from "@nestjs/common";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import request from "supertest";

@@ -5,7 +5,6 @@ from pathlib import Path
 import joblib
 import pandas as pd
 import numpy as np
-from prophet import Prophet
 
 from app.core.config import settings
 from app.preprocessing.loader import daily_sales
@@ -19,6 +18,10 @@ class ForecastModel:
         self.metrics = {}
 
     def train(self, df, holdout_days=30):
+        # Import lazy: Prophet berat dan tidak dibutuhkan untuk membaca
+        # artefak lama / menjalankan model per-toko berbasis baseline.
+        from prophet import Prophet
+
         ds = daily_sales(df)
         ds = ds.sort_values("date").reset_index(drop=True)
         # holdout: last `holdout_days` as test

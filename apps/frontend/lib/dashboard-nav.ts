@@ -59,6 +59,37 @@ export type NavItem = {
   exact?: boolean;
 };
 
+/** Profil minimum yang dibutuhkan untuk menentukan menu. */
+export type NavProfile = {
+  role: string;
+  stores: readonly { role: string }[];
+};
+
+/**
+ * Peran menu yang diturunkan dari KEPEMILIKAN TOKO, bukan peran platform.
+ *
+ * `Role.STAFF` di backend praktis tidak pernah dipakai: pendaftar mandiri
+ * selalu `OWNER` di platform, dan pegawai masuk lewat undangan yang hanya
+ * menambah membership. Jadi kalau menu memakai peran platform, pegawai yang
+ * menerima undangan akan melihat menu Pemilik. Sumber yang benar adalah
+ * membership toko.
+ *
+ * Peran platform `ADMIN` tetap menang karena admin tidak terikat toko. User
+ * yang sama sekali belum punya toko dianggap OWNER - justru supaya halaman
+ * "buat toko" tetap terlihat dan dia tidak mentok di dashboard kosong.
+ */
+export function deriveNavRole(profile: NavProfile | null): PlatformRole | null {
+  if (profile === null) return null;
+
+  const platform = toPlatformRole(profile.role);
+  if (platform === null) return null;
+  if (platform === "ADMIN") return "ADMIN";
+
+  if (profile.stores.length === 0) return "OWNER";
+
+  return profile.stores.some((store) => store.role === "OWNER") ? "OWNER" : "STAFF";
+}
+
 /**
  * Halaman depan `/dashboard` untuk sebuah peran.
  *
@@ -81,12 +112,11 @@ const ADMIN_NAV: readonly NavItem[] = [
   { key: "admin-ringkasan", label: "Ringkasan platform", href: "/dashboard/admin", exact: true },
   { key: "admin-toko", label: "Toko", href: "/dashboard/admin/stores" },
   { key: "admin-pengguna", label: "Pengguna", href: "/dashboard/admin/users" },
+  { key: "admin-notifikasi", label: "Notifikasi", href: "/dashboard/notifikasi" },
   {
     key: "admin-monitoring",
     label: "Monitoring",
-    href: null,
-    unavailableReason:
-      "Belum ada endpoint status service, model, atau job. Bagian ini menyusul setelah ada data penjualan.",
+    href: "/dashboard/admin/monitoring",
   },
   {
     key: "admin-audit",
@@ -100,44 +130,36 @@ const ADMIN_NAV: readonly NavItem[] = [
 /**
  * Menu OWNER toko.
  *
- * "Ringkasan toko" - omzet, produk terlaris, pola penjualan - memang butuh
- * data penjualan, dan fase ini belum punya satu pun baris. Jadi item itu
- * tampil sebagai teks mati dengan penjelasan, bukan angka nol yang terlihat
- * seperti hasil laporan.
+ * Semua halaman ini berbasis data tenant, jadi href-nya menunjuk ke halaman
+ * nyata dan bukan teks mati. Yang menentukan apakah isinya terisi adalah data
+ * toko, bukan peran.
  */
 const OWNER_NAV: readonly NavItem[] = [
-  {
-    key: "toko-ringkasan",
-    label: "Ringkasan toko",
-    href: null,
-    unavailableReason:
-      "Ringkasan omzet dan produk muncul setelah data penjualan pertama diunggah. Fase ini belum punya data penjualan.",
-  },
+  { key: "toko-ringkasan", label: "Ringkasan toko", href: "/dashboard/analytics" },
+  { key: "analisis-ml", label: "Analisis ML", href: "/dashboard/analytics-jobs" },
+  { key: "data", label: "Data penjualan", href: "/dashboard/data" },
+  { key: "pesanan", label: "Pesanan", href: "/dashboard/orders" },
+  { key: "katalog", label: "Katalog", href: "/dashboard/catalog" },
+  { key: "laporan", label: "Laporan", href: "/dashboard/reports" },
   { key: "toko-dan-tim", label: "Toko & Tim", href: "/dashboard/toko" },
+  { key: "notifikasi", label: "Notifikasi", href: "/dashboard/notifikasi" },
   { key: "profil", label: "Profil", href: "/dashboard/profil" },
 ];
 
 /**
  * Menu STAFF.
  *
- * Tidak ada satu pun item admin, dan tidak ada item management. Perbedaannya
- * dari OWNER bukan label saja: label "Toko" di sini sudah menyebut read-only
- * dan halamannya memang tidak punya kontrol mutasi, jadi menu tidak
- * menjanjikan sesuatu yang halaman tidak lakukan.
+ * Tidak ada item admin, dan tidak ada halaman yang butuh kendali pemilik:
+ * katalog dan unggah data hanya untuk OWNER. Perbedaannya dari OWNER bukan
+ * label saja - halaman yang tersisa memang tidak menyediakan kontrol mutasi
+ * katalog, jadi menu tidak menjanjikan sesuatu yang halaman tidak lakukan.
  */
 const STAFF_NAV: readonly NavItem[] = [
-  {
-    key: "toko-ringkasan",
-    label: "Ringkasan toko",
-    href: null,
-    unavailableReason:
-      "Ringkasan omzet dan produk muncul setelah data penjualan pertama diunggah. Fase ini belum punya data penjualan.",
-  },
-  {
-    key: "toko",
-    label: "Toko (hanya baca)",
-    href: "/dashboard/toko",
-  },
+  { key: "toko-ringkasan", label: "Ringkasan toko (hanya baca)", href: "/dashboard/analytics" },
+  { key: "pesanan", label: "Pesanan", href: "/dashboard/orders" },
+  { key: "laporan", label: "Laporan (hanya baca)", href: "/dashboard/reports" },
+  { key: "toko", label: "Toko (hanya baca)", href: "/dashboard/toko" },
+  { key: "notifikasi", label: "Notifikasi", href: "/dashboard/notifikasi" },
   { key: "profil", label: "Profil", href: "/dashboard/profil" },
 ];
 
@@ -159,4 +181,16 @@ export function navForRole(role: PlatformRole | null): readonly NavItem[] {
 /** Item menu yang punya tujuan navigasi saja (tanpa yang `href: null`). */
 export function navigableNavItems(role: PlatformRole | null): readonly NavItem[] {
   return navForRole(role).filter((item) => item.href !== null);
+}
+
+/**
+ * Apakah `storeId` boleh dimutasi oleh user berdasarkan daftar toko yang dia
+ * miliki. Sumber kebenaran backend tetap @StoreAccess; ini hanya UX.
+ */
+export function canManageStore(
+  stores: readonly { id: string; role: string }[] | null | undefined,
+  storeId: string | null,
+): boolean {
+  if (storeId === null || stores == null) return false;
+  return stores.some((store) => store.id === storeId && store.role === "OWNER");
 }

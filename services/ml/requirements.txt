@@ -1,6 +1,9 @@
 ﻿# Machine Learning service - requirements
 pandas>=3.0.0
 numpy>=2.0.0
+# Artefak joblib di repo ini menyimpan array pandas dengan backend Arrow.
+# Tanpa pyarrow, `joblib.load` melempar ModuleNotFoundError: pyarrow.lib.
+pyarrow>=17.0.0
 scipy>=1.14.0
 scikit-learn>=1.9.0
 statsmodels>=0.15.0

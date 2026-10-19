@@ -1,23 +1,95 @@
-import { Injectable } from "@nestjs/common";
+import { Injectable, NotFoundException } from "@nestjs/common";
 import { PrismaService } from "../database/prisma.service.js";
+import {
+  EXCLUDED_ORDER_STATUSES,
+  resolveStoreWindow,
+  serializeWindow,
+} from "../common/utils/store-window.js";
 import ExcelJS from "exceljs";
-import * as fs from "node:fs";
-import * as path from "node:path";
+
+type NormalizedForecast = {
+  date: string;
+  predicted: number;
+  confidence: number | null;
+  lower: number;
+  upper: number;
+  scope: "product" | "store";
+};
 
 @Injectable()
 export class ReportsService {
   constructor(private readonly prisma: PrismaService) {}
 
+  /**
+   * Forecast laporan berasal dari salah satu dari dua sumber nyata:
+   * 1. `forecastResults` untuk forecast per produk (bila tersedia);
+   * 2. hasil job ML terakhir untuk toko (forecast penjualan harian).
+   *
+   * Tidak ada angka contoh di sini. Kalau keduanya kosong, laporan menyatakan
+   * bahwa analisis belum dijalankan - bukan menampilkan grafik palsu.
+   */
+  private async loadForecast(
+    storeId: string,
+    productId: string,
+  ): Promise<{ rows: NormalizedForecast[]; scope: "product" | "store" }> {
+    const stored = await this.prisma.forecastResults.findMany({
+      where: { storeId, productId },
+      orderBy: { forecastDate: "asc" },
+      take: 30,
+    });
+    if (stored.length > 0) {
+      return {
+        scope: "product",
+        rows: stored.map((row) => ({
+          date: row.forecastDate.toISOString().slice(0, 10),
+          predicted: Number(row.predictedQty),
+          confidence: Number(row.confidence),
+          lower: Number(row.lowerBound ?? row.predictedQty),
+          upper: Number(row.upperBound ?? row.predictedQty),
+          scope: "product" as const,
+        })),
+      };
+    }
+
+    const job = await this.prisma.mlJobs.findFirst({
+      where: { storeId, jobType: "forecast", status: "completed" },
+      orderBy: { completedAt: "desc" },
+    });
+    const payload = (job?.result ?? null) as Record<string, unknown> | null;
+    const forecasts = Array.isArray(payload?.forecasts) ? payload.forecasts : [];
+    const rows: NormalizedForecast[] = [];
+    for (const item of forecasts) {
+      if (typeof item !== "object" || item === null) continue;
+      const row = item as Record<string, unknown>;
+      const predicted = Number(row.predicted);
+      const date = typeof row.date === "string" ? row.date.slice(0, 10) : null;
+      if (date === null || !Number.isFinite(predicted)) continue;
+      rows.push({
+        date,
+        predicted,
+        confidence: null,
+        lower: Number.isFinite(Number(row.lower)) ? Number(row.lower) : predicted,
+        upper: Number.isFinite(Number(row.upper)) ? Number(row.upper) : predicted,
+        scope: "store",
+      });
+    }
+    return { rows, scope: "store" };
+  }
+
+
   async generateSalesSummaryPDF(storeId: string, period: "7d" | "30d" | "90d" = "30d"): Promise<Buffer> {
     const days = period === "7d" ? 7 : period === "30d" ? 30 : 90;
-    const startDate = new Date();
-    startDate.setDate(startDate.getDate() - days);
+    const window = await resolveStoreWindow(this.prisma, storeId, days);
 
     const store = await this.prisma.stores.findFirst({ where: { id: storeId } });
-    if (!store) throw new Error("Store not found");
+    if (!store) throw new NotFoundException("Toko tidak ditemukan.");
 
     const orders = await this.prisma.orders.findMany({
-      where: { storeId, orderDate: { gte: startDate } },
+      where: {
+        storeId,
+        status: { notIn: [...EXCLUDED_ORDER_STATUSES] },
+        orderDate: { gte: window.start, lte: window.end },
+      },
       include: { items: true, customer: true },
     });
 
@@ -43,7 +115,7 @@ export class ReportsService {
 </head>
 <body>
   <h1>Laporan Penjualan - ${store.name}</h1>
-  <p>Periode: ${period === "7d" ? "7 hari" : period === "30d" ? "30 hari" : "90 hari"}</p>
+  <p>Periode: ${period === "7d" ? "7 hari" : period === "30d" ? "30 hari" : "90 hari"} (${serializeWindow(window).start} s/d ${serializeWindow(window).end})</p>
   <p>Tanggal: ${new Date().toLocaleDateString("id-ID")}</p>
   
   <div class="summary">
@@ -89,13 +161,16 @@ export class ReportsService {
 
   async generateDetailedExcel(storeId: string): Promise<Buffer> {
     const store = await this.prisma.stores.findFirst({ where: { id: storeId } });
-    if (!store) throw new Error("Store not found");
+    if (!store) throw new NotFoundException("Toko tidak ditemukan.");
 
-    const last90Days = new Date();
-    last90Days.setDate(last90Days.getDate() - 90);
+    const window = await resolveStoreWindow(this.prisma, storeId, 90);
 
     const orders = await this.prisma.orders.findMany({
-      where: { storeId, orderDate: { gte: last90Days } },
+      where: {
+        storeId,
+        status: { notIn: [...EXCLUDED_ORDER_STATUSES] },
+        orderDate: { gte: window.start, lte: window.end },
+      },
       include: { items: { include: { product: true } }, customer: true },
       orderBy: { orderDate: "desc" },
     });
@@ -117,7 +192,7 @@ export class ReportsService {
           Number(item.qty) * Number(item.price),
           Number(order.total),
         ]
-          .map((v) => `"${v}"`)
+          .map((v) => `"${String(v)}"`)
           .join(",");
         csv += "\n";
       }
@@ -130,13 +205,14 @@ export class ReportsService {
     const product = await this.prisma.products.findFirst({
       where: { id: productId, storeId },
     });
-    if (!product) throw new Error("Product not found");
+    if (!product) throw new NotFoundException("Produk tidak ditemukan pada toko ini.");
 
-    const forecasts = await this.prisma.forecastResults.findMany({
-      where: { productId, forecastDate: { gte: new Date() } },
-      orderBy: { forecastDate: "asc" },
-      take: 30,
-    });
+    const forecast = await this.loadForecast(storeId, productId);
+    const forecasts = forecast.rows;
+    const scopeLabel =
+      forecast.scope === "product"
+        ? `Produk ${product.name} (${product.sku})`
+        : "Tingkat toko (hasil analisis ML terakhir)";
 
     const html = `
 <!DOCTYPE html>
@@ -153,15 +229,16 @@ export class ReportsService {
   </style>
 </head>
 <body>
-  <h1>Forecast Penjualan - ${product.name}</h1>
-  <p>SKU: ${product.sku}</p>
-  <p>Periode: 30 hari ke depan</p>
+  <h1>Forecast Penjualan</h1>
+  <p>Cakupan: ${scopeLabel}</p>
+  <p>Periode: ${forecasts.length} hari ke depan</p>
   <p>Tanggal: ${new Date().toLocaleDateString("id-ID")}</p>
+  ${forecasts.length === 0 ? "<p><strong>Belum ada hasil forecast tersimpan.</strong> Jalankan analisis forecast terlebih dahulu dari halaman Analisis ML.</p>" : ""}
 
   <table>
     <tr>
       <th>Tanggal</th>
-      <th>Prediksi (Qty)</th>
+      <th>Prediksi</th>
       <th>Confidence</th>
       <th>Lower Bound</th>
       <th>Upper Bound</th>
@@ -170,11 +247,11 @@ export class ReportsService {
       .map(
         (f) => `
     <tr>
-      <td>${f.forecastDate.toLocaleDateString("id-ID")}</td>
-      <td>${Number(f.predictedQty).toFixed(2)}</td>
-      <td>${(Number(f.confidence) * 100).toFixed(0)}%</td>
-      <td>${Number(f.lowerBound || 0).toFixed(2)}</td>
-      <td>${Number(f.upperBound || 0).toFixed(2)}</td>
+      <td>${f.date}</td>
+      <td>${f.predicted.toFixed(2)}</td>
+      <td>${f.confidence === null ? "-" : `${(f.confidence * 100).toFixed(0)}%`}</td>
+      <td>${f.lower.toFixed(2)}</td>
+      <td>${f.upper.toFixed(2)}</td>
     </tr>
     `,
       )
@@ -193,14 +270,17 @@ export class ReportsService {
     period: "7d" | "30d" | "90d" = "30d",
   ): Promise<Buffer> {
     const days = period === "7d" ? 7 : period === "30d" ? 30 : 90;
-    const startDate = new Date();
-    startDate.setDate(startDate.getDate() - days);
+    const window = await resolveStoreWindow(this.prisma, storeId, days);
 
     const store = await this.prisma.stores.findFirst({ where: { id: storeId } });
-    if (!store) throw new Error("Store not found");
+    if (!store) throw new NotFoundException("Toko tidak ditemukan.");
 
     const orders = await this.prisma.orders.findMany({
-      where: { storeId, orderDate: { gte: startDate } },
+      where: {
+        storeId,
+        status: { notIn: [...EXCLUDED_ORDER_STATUSES] },
+        orderDate: { gte: window.start, lte: window.end },
+      },
       include: { items: { include: { product: true } }, customer: true },
       orderBy: { orderDate: "asc" },
     });
@@ -218,13 +298,15 @@ export class ReportsService {
     summary.addRows([
       { metric: "Toko", value: store.name },
       { metric: "Periode", value: period === "7d" ? "7 hari" : period === "30d" ? "30 hari" : "90 hari" },
+      { metric: "Rentang data", value: `${serializeWindow(window).start} s/d ${serializeWindow(window).end}` },
       { metric: "Tanggal laporan", value: new Date().toLocaleDateString("id-ID") },
       { metric: "Total penjualan", value: totalSales },
       { metric: "Total pesanan", value: totalOrderCount },
       { metric: "Total item", value: totalItems },
       { metric: "Rata-rata per pesanan", value: avgOrderValue },
     ]);
-    for (let row = 4; row <= 7; row++) summary.getCell(`B${row}`).numFmt = '#,##0';
+    summary.getCell("B6").numFmt = '#,##0';
+    summary.getCell("B9").numFmt = '#,##0';
 
     const channels = new Map<string, { sales: number; orders: number }>();
     for (const order of orders) {
@@ -305,14 +387,17 @@ export class ReportsService {
 
   async generateSalesSummaryPdf(storeId: string, period: "7d" | "30d" | "90d" = "30d"): Promise<Buffer> {
     const days = period === "7d" ? 7 : period === "30d" ? 30 : 90;
-    const startDate = new Date();
-    startDate.setDate(startDate.getDate() - days);
+    const window = await resolveStoreWindow(this.prisma, storeId, days);
 
     const store = await this.prisma.stores.findFirst({ where: { id: storeId } });
-    if (!store) throw new Error("Store not found");
+    if (!store) throw new NotFoundException("Toko tidak ditemukan.");
 
     const orders = await this.prisma.orders.findMany({
-      where: { storeId, orderDate: { gte: startDate } },
+      where: {
+        storeId,
+        status: { notIn: [...EXCLUDED_ORDER_STATUSES] },
+        orderDate: { gte: window.start, lte: window.end },
+      },
       include: { items: { include: { product: true } }, customer: true },
       orderBy: { orderDate: "asc" },
     });
@@ -332,7 +417,7 @@ export class ReportsService {
 
       doc.fontSize(18).text(`Laporan Penjualan - ${store.name}`, { align: "center" });
       doc.moveDown(0.3);
-      doc.fontSize(10).text(`Periode: ${period === "7d" ? "7 hari" : period === "30d" ? "30 hari" : "90 hari"}`, { align: "center" });
+      doc.fontSize(10).text(`Periode: ${period === "7d" ? "7 hari" : period === "30d" ? "30 hari" : "90 hari"} (${serializeWindow(window).start} s/d ${serializeWindow(window).end})`, { align: "center" });
       doc.text(`Tanggal: ${new Date().toLocaleDateString("id-ID")}`, { align: "center" });
       doc.moveDown(1);
 
@@ -373,13 +458,16 @@ export class ReportsService {
 
   async generateDetailedXlsx(storeId: string): Promise<Buffer> {
     const store = await this.prisma.stores.findFirst({ where: { id: storeId } });
-    if (!store) throw new Error("Store not found");
+    if (!store) throw new NotFoundException("Toko tidak ditemukan.");
 
-    const last90Days = new Date();
-    last90Days.setDate(last90Days.getDate() - 90);
+    const window = await resolveStoreWindow(this.prisma, storeId, 90);
 
     const orders = await this.prisma.orders.findMany({
-      where: { storeId, orderDate: { gte: last90Days } },
+      where: {
+        storeId,
+        status: { notIn: [...EXCLUDED_ORDER_STATUSES] },
+        orderDate: { gte: window.start, lte: window.end },
+      },
       include: { items: { include: { product: true } }, customer: true },
       orderBy: { orderDate: "desc" },
     });
@@ -440,13 +528,14 @@ export class ReportsService {
     const product = await this.prisma.products.findFirst({
       where: { id: productId, storeId },
     });
-    if (!product) throw new Error("Product not found");
+    if (!product) throw new NotFoundException("Produk tidak ditemukan pada toko ini.");
 
-    const forecasts = await this.prisma.forecastResults.findMany({
-      where: { productId, forecastDate: { gte: new Date() } },
-      orderBy: { forecastDate: "asc" },
-      take: 30,
-    });
+    const forecast = await this.loadForecast(storeId, productId);
+    const forecasts = forecast.rows;
+    const scopeLabel =
+      forecast.scope === "product"
+        ? `Produk ${product.name} (${product.sku})`
+        : "Tingkat toko (hasil analisis ML terakhir)";
 
     const pdfModule: any = await import("pdfkit");
     const PDFDocument = pdfModule.default;
@@ -458,10 +547,15 @@ export class ReportsService {
       doc.on("end", () => resolve(Buffer.concat(chunks)));
       doc.on("error", reject);
 
-      doc.fontSize(16).text(`Forecast Penjualan - ${product.name}`, { align: "center" });
+      doc.fontSize(16).text("Forecast Penjualan", { align: "center" });
       doc.moveDown(0.3);
-      doc.fontSize(10).text(`SKU: ${product.sku}  |  Periode: 30 hari ke depan  |  Tanggal: ${new Date().toLocaleDateString("id-ID")}`, { align: "center" });
+      doc.fontSize(10).text(`Cakupan: ${scopeLabel}  |  Periode: ${forecasts.length} hari  |  Tanggal: ${new Date().toLocaleDateString("id-ID")}`, { align: "center" });
       doc.moveDown(1);
+
+      if (forecasts.length === 0) {
+        doc.fontSize(10).text("Belum ada hasil forecast tersimpan. Jalankan analisis forecast terlebih dahulu.");
+        doc.moveDown(1);
+      }
 
       doc.font("Helvetica-Bold").fontSize(9);
       const headers = ["Tanggal", "Prediksi", "Confidence", "Lower", "Upper"];
@@ -472,11 +566,16 @@ export class ReportsService {
 
       for (const forecast of forecasts) {
         const y = doc.y;
-        doc.text(forecast.forecastDate.toLocaleDateString("id-ID"), 50, y, { width: 115 });
-        doc.text(Number(forecast.predictedQty).toFixed(2), 170, y, { width: 115 });
-        doc.text(`${(Number(forecast.confidence) * 100).toFixed(0)}%`, 290, y, { width: 115 });
-        doc.text(Number(forecast.lowerBound || 0).toFixed(2), 410, y, { width: 115 });
-        doc.text(Number(forecast.upperBound || 0).toFixed(2), 530, y, { width: 115 });
+        doc.text(forecast.date, 50, y, { width: 115 });
+        doc.text(forecast.predicted.toFixed(2), 170, y, { width: 115 });
+        doc.text(
+          forecast.confidence === null ? "-" : `${(forecast.confidence * 100).toFixed(0)}%`,
+          290,
+          y,
+          { width: 115 },
+        );
+        doc.text(forecast.lower.toFixed(2), 410, y, { width: 115 });
+        doc.text(forecast.upper.toFixed(2), 530, y, { width: 115 });
         doc.moveDown(0.2);
       }
 

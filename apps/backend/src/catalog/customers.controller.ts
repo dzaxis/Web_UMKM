@@ -24,7 +24,7 @@ export class CustomersController {
 
   @Get("export")
   @Roles(Role.OWNER, Role.ADMIN)
-  @StoreAccess()
+  @StoreAccess("OWNER")
   async exportSegments(
     @Param("storeId") storeId: string,
     @Query("segment") segment: string | undefined,
@@ -49,14 +49,14 @@ export class CustomersController {
 
   @Post()
   @Roles(Role.OWNER, Role.ADMIN)
-  @StoreAccess()
+  @StoreAccess("OWNER")
   async create(@Param("storeId") storeId: string, @Body() body: any) {
     return { data: await this.service.create(storeId, body) };
   }
 
   @Patch(":id")
   @Roles(Role.OWNER, Role.ADMIN)
-  @StoreAccess()
+  @StoreAccess("OWNER")
   async update(@Param("storeId") storeId: string, @Param("id") id: string, @Body() body: any) {
     return { data: await this.service.update(storeId, id, body) };
   }

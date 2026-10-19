@@ -4,6 +4,12 @@ import { ConfigService } from "@nestjs/config";
 
 type MlResult = any;
 
+/**
+ * Error dari FastAPI yang TIDAK layak diulang (4xx: payload/permission).
+ * Dipisahkan supaya loop retry tidak memanggil ulang kesalahan yang sama.
+ */
+class MlRequestError extends Error {}
+
 @Injectable()
 export class MlClientService {
   private readonly logger = new Logger(MlClientService.name);
@@ -37,13 +43,27 @@ export class MlClientService {
           signal: ac.signal,
         });
         clearTimeout(timer);
-        if (!res.ok) throw new Error(`ML ${path} failed: ${res.status} ${res.statusText}`);
+        if (!res.ok) {
+          // FastAPI mengirim detail validasi di body. Tanpa ini, satu-satunya
+          // petunjuk hanyalah "422" dan penyebabnya tidak bisa didiagnosis
+          // dari job yang gagal.
+          const detail = (await res.text()).slice(0, 1000);
+          const message = `ML ${path} failed: ${res.status} ${res.statusText}${detail ? ` - ${detail}` : ""}`;
+          if (res.status < 500) {
+            // 4xx = payload tidak valid; mengulang tidak akan berubah.
+            this.failures = 0;
+            this.state = "closed";
+            throw new MlRequestError(message);
+          }
+          throw new Error(message);
+        }
         const json = await res.json();
         this.failures = 0;
         this.state = "closed";
         return json;
       } catch (e) {
         clearTimeout(timer);
+        if (e instanceof MlRequestError) throw e;
         lastErr = e instanceof Error ? e : new Error(String(e));
         this.logger.warn(`ML call attempt ${attempt + 1} failed: ${lastErr.message}`);
       }
@@ -72,6 +92,51 @@ export class MlClientService {
 
   async anomaly() {
     return this.call("/anomaly", {});
+  }
+
+  // ---------------------------------------------------------------------
+  // Per-toko: data toko dikirim eksplisit, bukan memakai deret global
+  // yang tersimpan di artefak. Ini yang membuat hasil ML benar-benar
+  // berasal dari transaksi toko yang sedang dianalisis.
+  // ---------------------------------------------------------------------
+
+  async forecastFromSeries(series: Array<{ date: string; sales: number; orders?: number }>, horizonDays = 30) {
+    return this.call("/forecast/run", { series, horizon_days: horizonDays });
+  }
+
+  async segmentationFromCustomers(
+    customers: Array<{
+      customer_id: string;
+      recency: number;
+      frequency: number;
+      monetary: number;
+      tenure: number;
+      avg_order_value: number;
+    }>,
+  ) {
+    return this.call("/segmentation/run", { customers });
+  }
+
+  async basketFromTransactions(transactions: Array<{ order_id: string; items: string[] }>, topK = 20) {
+    return this.call("/basket/run", { transactions, top_k: topK });
+  }
+
+  async churnFromCustomers(
+    customers: Array<{
+      customer_id: string;
+      recency: number;
+      frequency: number;
+      monetary: number;
+      tenure: number;
+      avg_order_value: number;
+    }>,
+    topK = 50,
+  ) {
+    return this.call("/churn/run", { customers, top_k: topK });
+  }
+
+  async anomalyFromSeries(series: Array<{ date: string; sales: number; orders?: number }>) {
+    return this.call("/anomaly/run", { series });
   }
 
   async health() {

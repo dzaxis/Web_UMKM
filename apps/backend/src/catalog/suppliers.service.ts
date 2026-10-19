@@ -67,7 +67,7 @@ export class SuppliersService {
     });
     if (!product) throw new Error("Product not found");
 
-    const supplier = await this.get(storeId, body.supplierId);
+    await this.get(storeId, body.supplierId);
 
     return this.prisma.productSuppliers.upsert({
       where: { productId_supplierId: { productId, supplierId: body.supplierId } },

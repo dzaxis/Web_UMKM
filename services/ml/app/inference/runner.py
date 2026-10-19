@@ -4,8 +4,8 @@ import json
 import sys
 from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
-if str(ROOT / "services" / "ml") not in sys.path:
-    sys.path.insert(0, str(ROOT / "services" / "ml"))
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from app.models.forecast import ForecastModel
 from app.models.segmentation import SegmentationModel
@@ -15,8 +15,12 @@ from app.models.anomaly import AnomalyModel
 
 
 class InferenceRunner:
-    def __init__(self, artifacts_dir="services/ml/artifacts"):
-        self.artifacts_dir = artifacts_dir
+    def __init__(self, artifacts_dir: str | None = None):
+        # Path absolut membuat service bisa dijalankan dari mana pun, bukan
+        # hanya saat cwd kebetulan repo root.
+        self.artifacts_dir = artifacts_dir or str(
+            Path(__file__).resolve().parents[2] / "artifacts"
+        )
         self.forecast_model = None
         self.segmentation_model = None
         self.basket_model = None
@@ -113,3 +117,35 @@ class InferenceRunner:
             f"Tanda (marker) ini berarti pola perlu ditinjau, bukan otomatis fraud."
         )
         return r
+
+    # -----------------------------------------------------------------
+    # Per-toko: menerima agregat dari NestJS, bukan membaca artefak global.
+    # -----------------------------------------------------------------
+
+    def forecast_store(self, series, horizon_days=30):
+        from app.inference.store_runner import forecast_series
+
+        return forecast_series(series, horizon_days)
+
+    def segmentation_store(self, customers):
+        from app.inference.store_runner import segment_customers
+
+        return segment_customers(customers)
+
+    def basket_store(self, transactions, top_k=20):
+        from app.inference.store_runner import basket_transactions
+
+        return basket_transactions(transactions, top_k)
+
+    def churn_store(self, customers, top_k=50):
+        from app.inference.store_runner import churn_customers
+
+        # Model churn global di-apply ke fitur toko. Kalau artefak tidak bisa
+        # dimuat, endpoint mengembalikan 404 - bukan hasil karangan.
+        self._require(self.churn_model, "churn")
+        return churn_customers(self.churn_model, customers, top_k)
+
+    def anomaly_store(self, series):
+        from app.inference.store_runner import anomaly_series
+
+        return anomaly_series(series)

@@ -17,7 +17,7 @@ export class MarginsController {
 
   @Patch()
   @Roles(Role.OWNER, Role.ADMIN)
-  @StoreAccess()
+  @StoreAccess("OWNER")
   async setMargin(
     @Param("storeId") storeId: string,
     @Param("productId") productId: string,

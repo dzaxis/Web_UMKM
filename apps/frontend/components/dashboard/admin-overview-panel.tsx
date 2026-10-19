@@ -151,13 +151,13 @@ export function AdminOverviewPanel() {
 
       <Card variant="outline">
         <CardHeader>
-          <CardTitle className="text-base">Monitoring dan Audit Log</CardTitle>
+          <CardTitle className="text-base">Monitoring</CardTitle>
           <CardDescription>
-            Belum tersedia di fase ini, dan sengaja tidak diisi dengan angka
-            nol atau status tebakan. Status service, model, dan job butuh
-            endpoint yang belum ada; jejak audit sudah tercatat di backend tapi
-            belum bisa dibaca oleh admin. Keduanya akan muncul sebagai menu
-            tersendiri, bukan sebagai halaman kosong.
+            Status ML service dan riwayat job lintas toko tersedia di menu{" "}
+            <Link href="/dashboard/admin/monitoring" className="underline underline-offset-4">
+              Monitoring
+            </Link>
+            . Audit Log tetap belum terbaca admin (endpoint belum ada).
           </CardDescription>
         </CardHeader>
       </Card>

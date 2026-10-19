@@ -1,6 +1,5 @@
 import { Injectable } from "@nestjs/common";
 import { parse as parseCsv } from 'csv-parse/sync';
-import type { Express } from "express";
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -218,7 +217,7 @@ export class DatasetsService {
       const price = Number(row[mapping.unit_price]);
       const total = Number(mapping.total_price ? row[mapping.total_price] : qty * price);
 
-      const upsertedCustomer = await this.prisma.$transaction(async (tx: any) => {
+      await this.prisma.$transaction(async (tx: any) => {
         const customer = await tx.customers.upsert({
           where: { storeId_code: { storeId, code: customerCode } },
           update: { name: row[mapping.customer_name] ?? customerCode, segment: null },
@@ -264,9 +263,9 @@ export class DatasetsService {
     for (const [orderKey, itemRows] of grouped.entries()) {
       const first = itemRows[0];
       const orderTotal = itemRows.reduce((sum, item) => sum + (item.total || 0), 0);
-      const orderRecord = records.find((r: any) => String((r as any)?.[mapping.order_id] ?? '').trim() === orderKey) as
-        | any
-        | undefined;
+      const orderRecord = (records as Record<string, string>[]).find(
+        (r) => String(r[mapping.order_id] ?? '').trim() === orderKey,
+      );
       await this.prisma.orders.create({
         data: {
           storeId,
@@ -296,7 +295,7 @@ export class DatasetsService {
   }
 
   async rollback(storeId: string, datasetId: string) {
-    const row = await this.getDatasetRow(storeId, datasetId);
+    await this.getDatasetRow(storeId, datasetId);
     await this.prisma.orders.deleteMany({ where: { datasetId } });
     const updated = await this.prisma.datasets.update({
       where: { id: datasetId },

@@ -28,6 +28,8 @@ import type { StoreMember, StoreSummary } from "@/lib/dashboard-data";
 
 import { useApiResource, toApiError } from "./use-api-resource";
 import { useSession } from "./session-provider";
+import { CreateStorePanel } from "./create-store-panel";
+import { InviteMemberForm } from "./invite-member-form";
 
 /**
  * Halaman toko untuk OWNER dan STAFF.
@@ -91,17 +93,20 @@ export function StoresPanel() {
           ))}
         </ul>
       ) : (
-        <EmptyState
-          title="Belum ada toko yang bisa Anda akses"
-          description={
-            <>
-              Daftar ini berasal dari keanggotaan toko Anda sendiri, jadi kosong
-              berarti Anda belum menjadi anggota toko mana pun. Setelah toko
-              dibuat atau Anda menerima undangan, tokonya muncul di sini
-              beserta timnya.
-            </>
-          }
-        />
+        <div className="flex flex-col gap-4">
+          <EmptyState
+            title="Belum ada toko yang bisa Anda akses"
+            description={
+              <>
+                Daftar ini berasal dari keanggotaan toko Anda sendiri, jadi
+                kosong berarti Anda belum menjadi anggota toko mana pun. Buat
+                toko pertama Anda di bawah, atau tunggu undangan dari pemilik
+                toko yang sudah ada.
+              </>
+            }
+          />
+          <CreateStorePanel onCreated={stores.reload} />
+        </div>
       )}
     </div>
   );
@@ -209,6 +214,7 @@ function StoreCard({
       </CardContent>
 
       {canManage ? <StoreEditor store={store} /> : null}
+      {canManage ? <InviteMemberForm storeId={store.id} /> : null}
     </Card>
   );
 }

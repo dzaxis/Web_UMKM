@@ -4,7 +4,6 @@ import {
   Get,
   Param,
   Post,
-  StreamableFile,
   UploadedFile,
   UseInterceptors,
 } from "@nestjs/common";
@@ -16,7 +15,6 @@ import type { AuthUser } from "../common/types/auth-user.js";
 import { ParseFilePipe, MaxFileSizeValidator } from "@nestjs/common";
 import { FileInterceptor } from "@nestjs/platform-express";
 import { diskStorage } from "multer";
-import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { extname } from "node:path";
@@ -94,7 +92,7 @@ export class DatasetsController {
 
   @Post(":datasetId/rollback")
   @Roles(Role.OWNER, Role.ADMIN)
-  @StoreAccess()
+  @StoreAccess("OWNER")
   async rollbackDataset(
     @Param("storeId") storeId: string,
     @Param("datasetId") datasetId: string,
